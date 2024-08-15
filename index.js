@@ -15,13 +15,21 @@ app.use(express.urlencoded({extended:true}))
 
 
 app.get('/chat/:roomid/:user',async (req,res)=>{
-  const group=await Group.findById(req.params.roomid);
-  const chats=await Chat.find({
-    roomid:req.params.roomid
-  })
-  console.log(chats);
+  const { roomid, user } = req.params;
+  const group = await Group.findById(roomid);
   
-    res.render('index',{roomid:req.params.roomid,user:req.params.user,groupname:group.name,previousmsgs:chats})
+  if (!group) {
+    return res.status(404).send('Group not found.');
+  }
+
+  if (group.isPersonal) {
+    if (!group.users.includes(user)) {
+      return res.status(403).send('You are not allowed to join this private group.');
+    }
+  }
+
+  const chats = await Chat.find({ roomid });
+  res.render('index', { roomid, user, groupname: group.name, previousmsgs: chats });
 })
 
 app.get("/group",async (req,res)=>{
@@ -30,16 +38,30 @@ app.get("/group",async (req,res)=>{
 
 app.post("/group", async (req, res) => {
   try {
-    console.log(req.body);
-    await Group.create({
-      name: req.body.name
+    const { name, users } = req.body;
+
+    // Convert comma-separated users string to an array
+    const userArray = users ? users.split(',').map(user => user.trim()) : [];
+
+    // Determine if the group is private
+    const isPersonal = userArray.length === 2;
+
+    // Create the group
+    const group = await Group.create({
+      name,
+      isPersonal, // Set as private if exactly two users
+      users: isPersonal ? userArray : [] // Set users list if private
     });
+
     res.redirect("/group");
   } catch (err) {
     console.error('Error creating group:', err);
     res.status(500).send('Internal Server Error');
   }
 });
+
+
+
 
 io.on('connection', (socket) => {
     console.log('a user connected',socket.id);
@@ -48,10 +70,29 @@ io.on('connection', (socket) => {
       });
    
 
-    socket.on("join_room",(data)=>{
-        console.log("joining room",data);
-        socket.join(data.roomid)
-    })
+      socket.on('join_room', async (data) => {
+        try {
+            const { roomid, user } = data;
+            const group = await Group.findById(roomid);
+
+            if (!group) {
+                return socket.emit('error', 'Group not found.');
+            }
+
+            if (group.isPersonal && !group.users.includes(user)) {
+                return socket.emit('error', 'You are not allowed to join this group.');
+            }
+
+            socket.join(roomid);
+            console.log(`User ${user} joined room ${roomid}`);
+        } catch (error) {
+            console.error('Error joining room:', error);
+            socket.emit('error', 'An error occurred while joining the room.');
+        }
+    });
+
+
+
     socket.on("new_msg",async (data)=>{
      
         const chat=await Chat.create({
